@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from git import GitCommandError, Repo
 from pydantic import BaseModel, Field
 
+from app.agent import AgenticReviewer
 from app.scanner import Finding, scan_repository
 
 MAX_FILES = 500
@@ -32,12 +33,28 @@ class VulnerabilityFinding(BaseModel):
     line_number: int
     rule: str
     severity: str
+    analysis: "FindingAnalysis | None" = None
+
+
+class FindingAnalysis(BaseModel):
+    explanation: str
+    diff: str
+    review: str
+    approved: bool
+
+
+class AgentActivity(BaseModel):
+    finding_id: str
+    step: str
+    status: str
+    detail: str
 
 
 class RepositoryScan(BaseModel):
     repository_url: str
     scanned_files: int
     findings: list[VulnerabilityFinding]
+    agent_activity: list[AgentActivity]
 
 
 def validate_github_url(url: str) -> str:
@@ -103,7 +120,13 @@ def scan_repository_for_vulnerabilities(request: RepositoryRequest) -> Repositor
             repo_path = Path(temporary_directory) / "repository"
             Repo.clone_from(clone_url, repo_path, depth=1, multi_options=["--no-tags"])
             findings, scanned_files = scan_repository(repo_path)
+            findings, agent_activity = AgenticReviewer().review_findings(repo_path, findings)
     except GitCommandError as error:
         raise HTTPException(422, "AegisReview could not clone that repository. Check that it exists and is public.") from error
 
-    return RepositoryScan(repository_url=request.url.strip(), scanned_files=scanned_files, findings=findings)
+    return RepositoryScan(
+        repository_url=request.url.strip(),
+        scanned_files=scanned_files,
+        findings=findings,
+        agent_activity=agent_activity,
+    )
