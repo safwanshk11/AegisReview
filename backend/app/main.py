@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from pathlib import Path
+from typing import Iterator
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from git import GitCommandError, Repo
 from pydantic import BaseModel, Field
 
@@ -130,3 +133,38 @@ def scan_repository_for_vulnerabilities(request: RepositoryRequest) -> Repositor
         findings=findings,
         agent_activity=agent_activity,
     )
+
+
+def sse_event(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+@app.post("/api/repositories/scan/stream")
+def stream_repository_scan(request: RepositoryRequest) -> StreamingResponse:
+    clone_url = validate_github_url(request.url)
+
+    def events() -> Iterator[str]:
+        try:
+            with tempfile.TemporaryDirectory(prefix="aegis-review-") as temporary_directory:
+                repo_path = Path(temporary_directory) / "repository"
+                Repo.clone_from(clone_url, repo_path, depth=1, multi_options=["--no-tags"])
+                findings, scanned_files = scan_repository(repo_path)
+                yield sse_event("findings", {
+                    "repository_url": request.url.strip(),
+                    "scanned_files": scanned_files,
+                    "findings": [VulnerabilityFinding(**finding).model_dump() for finding in findings],
+                })
+                finding_index = 0
+                for event in AgenticReviewer().iter_review(repo_path, findings):
+                    if event["type"] == "activity":
+                        yield sse_event("activity", event["activity"])
+                    else:
+                        analysis = event["finding"].get("analysis")
+                        if analysis:
+                            yield sse_event("analysis", {"index": finding_index, "analysis": analysis})
+                        finding_index += 1
+                yield sse_event("done", {})
+        except GitCommandError:
+            yield sse_event("error", {"detail": "AegisReview could not clone that repository. Check that it exists and is public."})
+
+    return StreamingResponse(events(), media_type="text/event-stream")
