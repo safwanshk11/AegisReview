@@ -6,7 +6,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from app.scanner import AWS_ACCESS_KEY, SECRET_ASSIGNMENT, Finding
 
@@ -32,39 +32,47 @@ class AgenticReviewer:
     def review_findings(self, root: Path, findings: list[Finding]) -> tuple[list[Finding], list[dict[str, str]]]:
         activity: list[dict[str, str]] = []
         enriched: list[Finding] = []
+        for event in self.iter_review(root, findings):
+            if event["type"] == "activity":
+                activity.append(event["activity"])
+            else:
+                enriched.append(event["finding"])
+        return enriched, activity
+
+    def iter_review(self, root: Path, findings: list[Finding]) -> Iterator[dict[str, Any]]:
+        """Yield each agent step as it happens, then the (possibly enriched) finding."""
         for finding in findings:
             finding_id = f"{finding['file']}:{finding['line_number']}"
             if not self.enabled:
                 for step in ("plan", "action", "review"):
-                    activity.append({
+                    yield {"type": "activity", "activity": {
                         "finding_id": finding_id,
                         "step": step,
                         "status": "skipped",
                         "detail": "Set OPENAI_API_KEY to enable the agentic review loop.",
-                    })
-                enriched.append(finding)
+                    }}
+                yield {"type": "finding", "finding": finding}
                 continue
 
             try:
                 context = read_finding_context(root, finding)
                 plan = self._call_json("plan", plan_prompt(finding, context))
-                activity.append({"finding_id": finding_id, "step": "plan", "status": "completed", "detail": plan["plan"]})
+                yield {"type": "activity", "activity": {"finding_id": finding_id, "step": "plan", "status": "completed", "detail": plan["plan"]}}
 
                 action = self._call_json("action", action_prompt(finding, context, plan["plan"]))
-                activity.append({"finding_id": finding_id, "step": "action", "status": "completed", "detail": "Generated a targeted unified diff."})
+                yield {"type": "activity", "activity": {"finding_id": finding_id, "step": "action", "status": "completed", "detail": "Generated a targeted unified diff."}}
 
                 review = self._call_json("review", review_prompt(finding, context, action["diff"]))
-                activity.append({"finding_id": finding_id, "step": "review", "status": "completed", "detail": review["review"]})
-                enriched.append(Finding(**finding, analysis={
+                yield {"type": "activity", "activity": {"finding_id": finding_id, "step": "review", "status": "completed", "detail": review["review"]}}
+                yield {"type": "finding", "finding": Finding(**finding, analysis={
                     "explanation": action["explanation"],
                     "diff": action["diff"],
                     "review": review["review"],
                     "approved": bool(review["approved"]),
-                }))
+                })}
             except (KeyError, ValueError, RuntimeError) as error:
-                activity.append({"finding_id": finding_id, "step": "review", "status": "failed", "detail": str(error)})
-                enriched.append(finding)
-        return enriched, activity
+                yield {"type": "activity", "activity": {"finding_id": finding_id, "step": "review", "status": "failed", "detail": str(error)}}
+                yield {"type": "finding", "finding": finding}
 
     def _call_json(self, step: str, prompt: str) -> dict[str, Any]:
         response = self.client.responses.create(
