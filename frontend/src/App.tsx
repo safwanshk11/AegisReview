@@ -83,6 +83,7 @@ export default function App() {
   const [openRows, setOpenRows] = useState<Set<string>>(new Set())
   const [phase, setPhase] = useState<'cloning' | 'scanning' | 'reviewing' | 'done' | ''>('')
   const [clonePercent, setClonePercent] = useState(0)
+  const [reviewEnabled, setReviewEnabled] = useState(false)
 
   useEffect(() => {
     fetch(`${API_URL}/api/health`)
@@ -155,7 +156,7 @@ export default function App() {
 
   async function streamScan(target: string) {
     const response = await fetch(`${API_URL}/api/repositories/scan/stream`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: target }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: target, review: reviewEnabled }),
     })
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => ({}))
@@ -185,8 +186,9 @@ export default function App() {
       setMessage(payload.phase === 'cloning' ? 'Cloning the repository…' : 'Scanning files for risk patterns…')
     } else if (name === 'findings') {
       setScan({ repository_url: payload.repository_url, scanned_files: payload.scanned_files, findings: payload.findings, agent_activity: [] })
-      setPhase(payload.findings.length ? 'reviewing' : 'done')
-      setMessage(payload.findings.length ? 'Reviewing findings live…' : 'No signals found in this pass.')
+      const willReview = reviewEnabled && payload.findings.length > 0
+      setPhase(willReview ? 'reviewing' : 'done')
+      setMessage(!payload.findings.length ? 'No signals found in this pass.' : willReview ? 'Reviewing findings live…' : 'Review the signals below.')
     } else if (name === 'activity') {
       setScan((current) => current && { ...current, agent_activity: [...current.agent_activity, payload] })
     } else if (name === 'analysis') {
@@ -240,7 +242,15 @@ export default function App() {
             <input id="repository-url" value={url} onChange={(event) => setUrl(event.target.value)} required placeholder="owner/repository" aria-describedby="form-hint" />
             <button disabled={loading}>{loading ? 'Working…' : mode === 'scan' ? 'Run scan' : 'Map files'} <span aria-hidden="true">↗</span></button>
           </div>
-          <p id="form-hint">Public repositories only. Clones are created in a temporary workspace and discarded after each run.</p>
+          <div className="form-footer">
+            <p id="form-hint">Public repositories only — your code is never stored.</p>
+            {mode === 'scan' && <label className={`ai-toggle ${reviewEnabled ? 'on' : ''}`}>
+              <input type="checkbox" checked={reviewEnabled} onChange={(event) => setReviewEnabled(event.target.checked)} />
+              <span className="ai-toggle-text">AI review <b>{reviewEnabled ? 'on' : 'off'}</b></span>
+              <span className="ai-switch"><span className="ai-knob" /></span>
+              <span className="ai-tip" role="tooltip">Runs the agent on your most severe findings — plain-English explanations and suggested fix diffs. Off keeps it a static scan. Uses your Gemini quota.</span>
+            </label>}
+          </div>
         </form>
       </div>
     </section>

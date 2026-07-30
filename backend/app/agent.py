@@ -24,7 +24,9 @@ class AgenticReviewer:
         if self.api_key and self.client is None:
             from openai import OpenAI
 
-            self.client = OpenAI(api_key=self.api_key, base_url=GEMINI_OPENAI_BASE_URL)
+            # Fail fast on rate limits/timeouts instead of blocking the scan on
+            # long retry backoffs; a failed step is reported per finding.
+            self.client = OpenAI(api_key=self.api_key, base_url=GEMINI_OPENAI_BASE_URL, timeout=30, max_retries=0)
 
     @property
     def enabled(self) -> bool:
@@ -71,8 +73,8 @@ class AgenticReviewer:
                     "review": review["review"],
                     "approved": bool(review["approved"]),
                 })}
-            except (KeyError, ValueError, RuntimeError) as error:
-                yield {"type": "activity", "activity": {"finding_id": finding_id, "step": "review", "status": "failed", "detail": str(error)}}
+            except Exception as error:
+                yield {"type": "activity", "activity": {"finding_id": finding_id, "step": "review", "status": "failed", "detail": str(error)[:300]}}
                 yield {"type": "finding", "finding": finding}
 
     def _call_json(self, step: str, prompt: str) -> dict[str, Any]:

@@ -25,10 +25,12 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 MAX_FILES = 500
 IGNORED_DIRECTORIES = {".git", "node_modules", ".venv", "venv", "dist", "build"}
+SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1}
 
 
 class RepositoryRequest(BaseModel):
     url: str = Field(..., examples=["https://github.com/owner/repository"])
+    review: bool = False
 
 
 class RepositoryInspection(BaseModel):
@@ -203,17 +205,22 @@ def stream_repository_scan(request: RepositoryRequest) -> StreamingResponse:
                     "scanned_files": scanned_files,
                     "findings": [VulnerabilityFinding(**finding).model_dump() for finding in findings],
                 })
-                finding_index = 0
-                for event in AgenticReviewer().iter_review(repo_path, findings):
-                    if event["type"] == "activity":
-                        yield sse_event("activity", event["activity"])
-                    else:
-                        analysis = event["finding"].get("analysis")
-                        if analysis:
-                            yield sse_event("analysis", {"index": finding_index, "analysis": analysis})
-                        finding_index += 1
+                if request.review:
+                    limit = int(os.getenv("AEGIS_REVIEW_LIMIT", "6"))
+                    order = sorted(range(len(findings)), key=lambda index: SEVERITY_RANK.get(findings[index]["severity"], 0), reverse=True)[:limit]
+                    reviewed = 0
+                    for event in AgenticReviewer().iter_review(repo_path, [findings[index] for index in order]):
+                        if event["type"] == "activity":
+                            yield sse_event("activity", event["activity"])
+                        else:
+                            analysis = event["finding"].get("analysis")
+                            if analysis:
+                                yield sse_event("analysis", {"index": order[reviewed], "analysis": analysis})
+                            reviewed += 1
                 yield sse_event("done", {})
         except GitCommandError:
             yield sse_event("error", {"detail": "AegisReview could not clone that repository. Check that it exists and is public."})
+        except Exception as error:
+            yield sse_event("error", {"detail": f"The scan stopped unexpectedly: {str(error)[:200]}"})
 
     return StreamingResponse(events(), media_type="text/event-stream")
