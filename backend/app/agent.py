@@ -1,4 +1,4 @@
-"""Three-step LLM review workflow for static security findings."""
+"""Three-step Gemini review workflow for static security findings."""
 
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ from typing import Any, Iterator
 
 from app.scanner import AWS_ACCESS_KEY, SECRET_ASSIGNMENT, Finding
 
-DEFAULT_MODEL = "gpt-5.6"
+DEFAULT_MODEL = "gemini-flash-latest"
+GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 
 class AgenticReviewer:
@@ -18,12 +19,12 @@ class AgenticReviewer:
 
     def __init__(self, api_key: str | None = None, model: str | None = None, client: Any | None = None) -> None:
         self.model = model or os.getenv("AEGIS_LLM_MODEL", DEFAULT_MODEL)
-        self.api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY")
+        self.api_key = api_key if api_key is not None else os.getenv("GEMINI_API_KEY")
         self.client = client
         if self.api_key and self.client is None:
             from openai import OpenAI
 
-            self.client = OpenAI(api_key=self.api_key)
+            self.client = OpenAI(api_key=self.api_key, base_url=GEMINI_OPENAI_BASE_URL)
 
     @property
     def enabled(self) -> bool:
@@ -49,7 +50,7 @@ class AgenticReviewer:
                         "finding_id": finding_id,
                         "step": step,
                         "status": "skipped",
-                        "detail": "Set OPENAI_API_KEY to enable the agentic review loop.",
+                        "detail": "Set GEMINI_API_KEY to enable the agentic review loop.",
                     }}
                 yield {"type": "finding", "finding": finding}
                 continue
@@ -75,11 +76,15 @@ class AgenticReviewer:
                 yield {"type": "finding", "finding": finding}
 
     def _call_json(self, step: str, prompt: str) -> dict[str, Any]:
-        response = self.client.responses.create(
+        response = self.client.chat.completions.create(
             model=self.model,
-            input=[{"role": "system", "content": "You are a careful application-security engineer. Return only valid JSON, with no markdown fences."}, {"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": "You are a careful application-security engineer. Return only valid JSON, with no markdown fences."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
         )
-        raw = getattr(response, "output_text", "")
+        raw = response.choices[0].message.content or ""
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as error:

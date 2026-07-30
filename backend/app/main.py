@@ -2,19 +2,26 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import tempfile
+import threading
 from pathlib import Path
 from typing import Iterator
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 from fastapi.responses import StreamingResponse
-from git import GitCommandError, Repo
+from git import GitCommandError, RemoteProgress, Repo
 from pydantic import BaseModel, Field
 
 from app.agent import AgenticReviewer
 from app.scanner import Finding, scan_repository
+
+# Load the repository-root .env (matches .env.example) so GEMINI_API_KEY and
+# other backend settings are available without exporting them by hand.
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 MAX_FILES = 500
 IGNORED_DIRECTORIES = {".git", "node_modules", ".venv", "venv", "dist", "build"}
@@ -139,6 +146,47 @@ def sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+class CloneProgress(RemoteProgress):
+    def __init__(self, updates: queue.Queue) -> None:
+        super().__init__()
+        self.updates = updates
+
+    def update(self, op_code, cur_count, max_count=None, message="") -> None:
+        self.updates.put((op_code, cur_count, max_count))
+
+
+def clone_with_progress(clone_url: str, repo_path: Path) -> Iterator[str]:
+    """Clone in a worker thread while yielding cloning-percent status events."""
+    updates: queue.Queue = queue.Queue()
+    result: dict[str, GitCommandError] = {}
+
+    def worker() -> None:
+        try:
+            Repo.clone_from(clone_url, repo_path, depth=1, multi_options=["--no-tags"], progress=CloneProgress(updates))
+        except GitCommandError as error:
+            result["error"] = error
+        finally:
+            updates.put(None)
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    yield sse_event("status", {"phase": "cloning", "percent": 0})
+    last_percent = 0
+    while True:
+        item = updates.get()
+        if item is None:
+            break
+        op_code, cur_count, max_count = item
+        if op_code & RemoteProgress.RECEIVING and max_count:
+            percent = min(100, int(cur_count / max_count * 100))
+            if percent != last_percent:
+                last_percent = percent
+                yield sse_event("status", {"phase": "cloning", "percent": percent})
+    thread.join()
+    if "error" in result:
+        raise result["error"]
+
+
 @app.post("/api/repositories/scan/stream")
 def stream_repository_scan(request: RepositoryRequest) -> StreamingResponse:
     clone_url = validate_github_url(request.url)
@@ -147,7 +195,8 @@ def stream_repository_scan(request: RepositoryRequest) -> StreamingResponse:
         try:
             with tempfile.TemporaryDirectory(prefix="aegis-review-") as temporary_directory:
                 repo_path = Path(temporary_directory) / "repository"
-                Repo.clone_from(clone_url, repo_path, depth=1, multi_options=["--no-tags"])
+                yield from clone_with_progress(clone_url, repo_path)
+                yield sse_event("status", {"phase": "scanning"})
                 findings, scanned_files = scan_repository(repo_path)
                 yield sse_event("findings", {
                     "repository_url": request.url.strip(),

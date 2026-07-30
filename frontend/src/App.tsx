@@ -14,6 +14,11 @@ const severityOrder: Finding['severity'][] = ['critical', 'high', 'medium', 'low
 const severityRank: Record<Finding['severity'], number> = { critical: 4, high: 3, medium: 2, low: 1 }
 const healthPenalty: Record<Finding['severity'], number> = { critical: 25, high: 12, medium: 5, low: 2 }
 
+function repositoryUrl(input: string) {
+  const path = input.trim().replace(/^https?:\/\//i, '').replace(/^github\.com\//i, '').replace(/^\/+/, '')
+  return `https://github.com/${path}`
+}
+
 function markdownReport(scan: Scan, health: number, findings: Finding[]) {
   const generatedAt = new Date().toISOString()
   const rows = findings.map((finding) => `| ${finding.severity} | \`${finding.file}:${finding.line_number}\` | ${finding.rule} |`).join('\n')
@@ -76,6 +81,8 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
   const [openRows, setOpenRows] = useState<Set<string>>(new Set())
+  const [phase, setPhase] = useState<'cloning' | 'scanning' | 'reviewing' | 'done' | ''>('')
+  const [clonePercent, setClonePercent] = useState(0)
 
   useEffect(() => {
     fetch(`${API_URL}/api/health`)
@@ -122,10 +129,13 @@ export default function App() {
     setScan(null)
     setInspection(null)
     setOpenRows(new Set())
+    setPhase(mode === 'scan' ? 'cloning' : '')
+    setClonePercent(0)
 
     try {
-      if (mode === 'scan') await streamScan()
-      else await inspect()
+      const target = repositoryUrl(url)
+      if (mode === 'scan') await streamScan(target)
+      else await inspect(target)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'The request did not complete.')
     } finally {
@@ -133,9 +143,9 @@ export default function App() {
     }
   }
 
-  async function inspect() {
+  async function inspect(target: string) {
     const response = await fetch(`${API_URL}/api/repositories/inspect`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: target }),
     })
     const payload = await response.json()
     if (!response.ok) throw new Error(payload.detail ?? 'The repository could not be inspected.')
@@ -143,9 +153,9 @@ export default function App() {
     setMessage('Repository map complete.')
   }
 
-  async function streamScan() {
+  async function streamScan(target: string) {
     const response = await fetch(`${API_URL}/api/repositories/scan/stream`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: target }),
     })
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => ({}))
@@ -169,14 +179,20 @@ export default function App() {
     const data = chunk.match(/^data: (.*)$/m)?.[1]
     if (!name || !data) return
     const payload = JSON.parse(data)
-    if (name === 'findings') {
+    if (name === 'status') {
+      setPhase(payload.phase)
+      if (typeof payload.percent === 'number') setClonePercent(payload.percent)
+      setMessage(payload.phase === 'cloning' ? 'Cloning the repository…' : 'Scanning files for risk patterns…')
+    } else if (name === 'findings') {
       setScan({ repository_url: payload.repository_url, scanned_files: payload.scanned_files, findings: payload.findings, agent_activity: [] })
+      setPhase(payload.findings.length ? 'reviewing' : 'done')
       setMessage(payload.findings.length ? 'Reviewing findings live…' : 'No signals found in this pass.')
     } else if (name === 'activity') {
       setScan((current) => current && { ...current, agent_activity: [...current.agent_activity, payload] })
     } else if (name === 'analysis') {
       setScan((current) => current && { ...current, findings: current.findings.map((finding, index) => index === payload.index ? { ...finding, analysis: payload.analysis } : finding) })
     } else if (name === 'done') {
+      setPhase('done')
       setMessage((current) => current === 'Reviewing findings live…' ? 'Review the signals below.' : current)
     } else if (name === 'error') {
       throw new Error(payload.detail)
@@ -184,6 +200,9 @@ export default function App() {
   }
 
   const hasResults = Boolean(scan || inspection)
+  const reviewTotal = (scan?.findings.length ?? 0) * 3
+  const reviewDone = scan?.agent_activity.length ?? 0
+  const reviewPct = reviewTotal ? Math.min(100, Math.round((reviewDone / reviewTotal) * 100)) : 0
 
   return <main className="app-shell">
     <div className="grain" />
@@ -228,9 +247,24 @@ export default function App() {
 
     <section className={`report ${hasResults ? 'has-results' : ''}`} aria-live="polite">
       <div className="report-heading">
-        <div><p className="eyebrow"><span />Current readout</p><h2>{hasResults ? message : 'A quiet screen is an invitation.'}</h2></div>
+        <div><p className="eyebrow"><span />Current readout</p><h2>{hasResults || loading ? message : 'A quiet screen is an invitation.'}</h2></div>
         {scan && <p className="scan-meta">{scan.scanned_files} files examined<br />{scan.findings.length} signals raised</p>}
       </div>
+
+      {loading && mode === 'scan' && phase !== 'done' && (() => {
+        const cloneKnown = phase === 'cloning' && clonePercent > 0
+        const determinate = phase === 'reviewing' || cloneKnown
+        const percent = phase === 'reviewing' ? reviewPct : clonePercent
+        return <div className="scan-progress">
+          <div className="progress-meta">
+            <span>{phase === 'cloning' ? 'Cloning repository' : phase === 'scanning' ? 'Scanning files' : `Reviewing ${scan?.findings.length ?? 0} ${(scan?.findings.length ?? 0) === 1 ? 'finding' : 'findings'}`}</span>
+            <span>{phase === 'reviewing' ? `${reviewDone}/${reviewTotal} · ${reviewPct}%` : cloneKnown ? `${clonePercent}%` : 'working…'}</span>
+          </div>
+          <div className={`progress-track ${determinate ? '' : 'indeterminate'}`}>
+            <div className="progress-fill" style={determinate ? { width: `${percent}%` } : undefined} />
+          </div>
+        </div>
+      })()}
 
       {scan ? <div className="scan-report">
         <div className="summary-card">
@@ -265,7 +299,7 @@ export default function App() {
                     <div className="detail-block"><h4>Explanation</h4><p>{finding.analysis.explanation}</p></div>
                     <div className="detail-block"><h4>Suggested fix<span className={`verdict ${finding.analysis.approved ? 'ok' : 'flag'}`}>{finding.analysis.approved ? 'self-review passed' : 'needs attention'}</span></h4><DiffView diff={finding.analysis.diff} /></div>
                     <div className="detail-block"><h4>Agent review</h4><p>{finding.analysis.review}</p></div>
-                  </> : <p className="detail-empty">Agent analysis unavailable. Set OPENAI_API_KEY to enable the plan → act → review loop.</p>}
+                  </> : <p className="detail-empty">Agent analysis unavailable. Set GEMINI_API_KEY to enable the plan → act → review loop.</p>}
                 </div>}
               </div>
             }) : <div className="clear-state"><ShieldMark /><p>No matching risk patterns were found.</p><small>That is a clean first pass—not a guarantee of safety.</small></div>}
