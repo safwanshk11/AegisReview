@@ -14,6 +14,41 @@ const severityOrder: Finding['severity'][] = ['critical', 'high', 'medium', 'low
 const severityRank: Record<Finding['severity'], number> = { critical: 4, high: 3, medium: 2, low: 1 }
 const healthPenalty: Record<Finding['severity'], number> = { critical: 25, high: 12, medium: 5, low: 2 }
 
+function markdownReport(scan: Scan, health: number, findings: Finding[]) {
+  const generatedAt = new Date().toISOString()
+  const rows = findings.map((finding) => `| ${finding.severity} | \`${finding.file}:${finding.line_number}\` | ${finding.rule} |`).join('\n')
+  const recommendations = findings.flatMap((finding) => finding.analysis
+    ? [`### ${finding.file}:${finding.line_number} — ${finding.rule}\n\n${finding.analysis.explanation}\n\n**Review:** ${finding.analysis.review}\n\n\`\`\`diff\n${finding.analysis.diff}\n\`\`\``]
+    : [])
+
+  return [
+    '# AegisReview security scan',
+    '',
+    `- **Repository:** ${scan.repository_url}`,
+    `- **Generated:** ${generatedAt}`,
+    `- **Files examined:** ${scan.scanned_files}`,
+    `- **Signals raised:** ${findings.length}`,
+    `- **Repository health:** ${health}/100`,
+    '',
+    '## Findings',
+    '',
+    '| Severity | Location | Finding |',
+    '| --- | --- | --- |',
+    rows || '| — | — | No signals found in this pass. |',
+    ...(recommendations.length ? ['', '## Agent recommendations', '', ...recommendations] : []),
+    '',
+  ].join('\n')
+}
+
+function downloadReport(content: string, filename: string, type: string) {
+  const url = URL.createObjectURL(new Blob([content], { type }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
 function ShieldMark() {
   return <svg aria-hidden="true" className="shield-mark" viewBox="0 0 42 48" fill="none">
     <path d="M21 2 38 8v13c0 11.7-6.8 20.1-17 25C10.8 41.1 4 32.7 4 21V8L21 2Z" stroke="currentColor" strokeWidth="2.5" />
@@ -67,6 +102,17 @@ export default function App() {
       next.has(key) ? next.delete(key) : next.add(key)
       return next
     })
+  }
+
+  function exportMarkdown() {
+    if (!scan) return
+    downloadReport(markdownReport(scan, health, sortedFindings), 'aegisreview-scan-report.md', 'text/markdown;charset=utf-8')
+  }
+
+  function exportJson() {
+    if (!scan) return
+    const report = { generated_at: new Date().toISOString(), repository_health: health, ...scan }
+    downloadReport(JSON.stringify(report, null, 2), 'aegisreview-scan-report.json', 'application/json;charset=utf-8')
   }
 
   async function run(event: FormEvent) {
@@ -197,7 +243,11 @@ export default function App() {
         <div className="findings-panel">
           <div className="findings-head">
             <span>{sortedFindings.length} {sortedFindings.length === 1 ? 'finding' : 'findings'}</span>
-            <button className="sort-toggle" onClick={() => setSortDirection((current) => current === 'desc' ? 'asc' : 'desc')} aria-label={`Sort by severity, ${sortDirection === 'desc' ? 'high to low' : 'low to high'}`}>Severity <span aria-hidden="true">{sortDirection === 'desc' ? '↓' : '↑'}</span></button>
+            <div className="findings-actions">
+              <button className="export-button" onClick={exportMarkdown}>Export Markdown</button>
+              <button className="export-button" onClick={exportJson}>Export JSON</button>
+              <button className="sort-toggle" onClick={() => setSortDirection((current) => current === 'desc' ? 'asc' : 'desc')} aria-label={`Sort by severity, ${sortDirection === 'desc' ? 'high to low' : 'low to high'}`}>Severity <span aria-hidden="true">{sortDirection === 'desc' ? '↓' : '↑'}</span></button>
+            </div>
           </div>
           <div className="findings">
             {sortedFindings.length ? sortedFindings.map((finding) => {
