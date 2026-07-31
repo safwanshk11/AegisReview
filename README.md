@@ -34,7 +34,7 @@ Open `http://localhost:5173`. The frontend calls `GET /api/health` on load and s
 
 It returns `scanned_files` and structured findings containing `file`, `line_number`, `rule`, and `severity`. The built-in, offline checks cover high-entropy hardcoded secrets, SQL string interpolation, XSS-prone template APIs, `eval`/`exec`, and a small known-bad dependency list for `package.json` and `requirements.txt`.
 
-Copy `.env.example` to `.env` and add a `GEMINI_API_KEY` from [Google AI Studio](https://aistudio.google.com/app/apikey) to enable the optional agentic plan → act → review loop. It defaults to `gemini-flash-latest`, and `AEGIS_REVIEW_LIMIT=6` caps the number of findings sent to Gemini for one scan. Add a `GITHUB_TOKEN` later if private repository support is needed. This scaffold currently accepts publicly cloneable GitHub repositories.
+Copy `.env.example` to `.env` and add a `GEMINI_API_KEY` from [Google AI Studio](https://aistudio.google.com/app/apikey) to enable the optional agentic plan → act → review loop. It defaults to `gemini-flash-latest`, and `AEGIS_REVIEW_LIMIT=6` caps the number of findings sent to Gemini for one scan. The scanner downloads a temporary GitHub source archive, so it runs on Vercel without a system `git` binary. Add a `GITHUB_TOKEN` later if private repository support is needed. This scaffold currently accepts publicly accessible GitHub repositories.
 
 ## Deploy to Vercel
 

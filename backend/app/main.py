@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import json
 import os
-import queue
 import tempfile
-import threading
+from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Iterator
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
+from zipfile import BadZipFile, ZipFile
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from fastapi.responses import StreamingResponse
-from git import GitCommandError, RemoteProgress, Repo
 from pydantic import BaseModel, Field
 
 from app.agent import AgenticReviewer
@@ -25,8 +27,23 @@ ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(ENV_PATH)
 
 MAX_FILES = 500
+MAX_ARCHIVE_BYTES = 100_000_000
 IGNORED_DIRECTORIES = {".git", "node_modules", ".venv", "venv", "dist", "build"}
 SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+
+
+@dataclass(frozen=True)
+class RepositoryReference:
+    owner: str
+    name: str
+
+    @property
+    def archive_url(self) -> str:
+        return f"https://api.github.com/repos/{self.owner}/{self.name}/zipball"
+
+
+class RepositoryDownloadError(RuntimeError):
+    """Raised when a GitHub repository archive cannot be downloaded safely."""
 
 
 class RepositoryRequest(BaseModel):
@@ -70,7 +87,7 @@ class RepositoryScan(BaseModel):
     agent_activity: list[AgentActivity]
 
 
-def validate_github_url(url: str) -> str:
+def validate_github_url(url: str) -> RepositoryReference:
     parsed = urlparse(url.strip())
     if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != "github.com":
         raise HTTPException(400, "Enter a GitHub repository URL, such as https://github.com/owner/repository.")
@@ -79,7 +96,52 @@ def validate_github_url(url: str) -> str:
     if len(segments) < 2:
         raise HTTPException(400, "The GitHub URL must include an owner and repository name.")
 
-    return f"https://github.com/{segments[0]}/{segments[1].removesuffix('.git')}.git"
+    return RepositoryReference(owner=segments[0], name=segments[1].removesuffix(".git"))
+
+
+def download_repository_archive(repository: RepositoryReference, destination: Path) -> None:
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "AegisReview"}
+    if github_token := os.getenv("GITHUB_TOKEN"):
+        headers["Authorization"] = f"Bearer {github_token}"
+
+    archive_path: Path | None = None
+    try:
+        request = Request(repository.archive_url, headers=headers)
+        with urlopen(request, timeout=30) as response:
+            content_length = response.headers.get("Content-Length")
+            if content_length and int(content_length) > MAX_ARCHIVE_BYTES:
+                raise RepositoryDownloadError("The repository archive is too large to scan.")
+            with tempfile.NamedTemporaryFile(dir=destination.parent, suffix=".zip", delete=False) as archive_file:
+                archive_path = Path(archive_file.name)
+                downloaded = 0
+                while chunk := response.read(64 * 1024):
+                    downloaded += len(chunk)
+                    if downloaded > MAX_ARCHIVE_BYTES:
+                        raise RepositoryDownloadError("The repository archive is too large to scan.")
+                    archive_file.write(chunk)
+
+        with ZipFile(archive_path) as archive:
+            members = archive.infolist()
+            roots: set[str] = set()
+            for member in members:
+                member_path = PurePosixPath(member.filename)
+                if member_path.is_absolute() or ".." in member_path.parts:
+                    raise RepositoryDownloadError("The repository archive contains an unsafe path.")
+                if member_path.parts:
+                    roots.add(member_path.parts[0])
+            if len(roots) != 1:
+                raise RepositoryDownloadError("The repository archive has an unexpected structure.")
+            archive.extractall(destination.parent)
+
+        source = destination.parent / roots.pop()
+        if not source.is_dir():
+            raise RepositoryDownloadError("The repository archive did not contain source files.")
+        source.rename(destination)
+    except (HTTPError, URLError, OSError, BadZipFile) as error:
+        raise RepositoryDownloadError("AegisReview could not download that repository. Check that it exists and is public.") from error
+    finally:
+        if archive_path:
+            archive_path.unlink(missing_ok=True)
 
 
 def walk_repository(root: Path) -> tuple[list[str], bool]:
@@ -113,29 +175,29 @@ def health() -> dict[str, str]:
 
 @app.post("/api/repositories/inspect", response_model=RepositoryInspection)
 def inspect_repository(request: RepositoryRequest) -> RepositoryInspection:
-    clone_url = validate_github_url(request.url)
+    repository = validate_github_url(request.url)
     try:
         with tempfile.TemporaryDirectory(prefix="aegis-review-") as temporary_directory:
             repo_path = Path(temporary_directory) / "repository"
-            Repo.clone_from(clone_url, repo_path, depth=1, multi_options=["--no-tags"])
+            download_repository_archive(repository, repo_path)
             files, truncated = walk_repository(repo_path)
-    except GitCommandError as error:
-        raise HTTPException(422, "AegisReview could not clone that repository. Check that it exists and is public.") from error
+    except RepositoryDownloadError as error:
+        raise HTTPException(422, str(error)) from error
 
     return RepositoryInspection(repository_url=request.url.strip(), files=files, file_count=len(files), truncated=truncated)
 
 
 @app.post("/api/repositories/scan", response_model=RepositoryScan)
 def scan_repository_for_vulnerabilities(request: RepositoryRequest) -> RepositoryScan:
-    clone_url = validate_github_url(request.url)
+    repository = validate_github_url(request.url)
     try:
         with tempfile.TemporaryDirectory(prefix="aegis-review-") as temporary_directory:
             repo_path = Path(temporary_directory) / "repository"
-            Repo.clone_from(clone_url, repo_path, depth=1, multi_options=["--no-tags"])
+            download_repository_archive(repository, repo_path)
             findings, scanned_files = scan_repository(repo_path)
             findings, agent_activity = AgenticReviewer().review_findings(repo_path, findings)
-    except GitCommandError as error:
-        raise HTTPException(422, "AegisReview could not clone that repository. Check that it exists and is public.") from error
+    except RepositoryDownloadError as error:
+        raise HTTPException(422, str(error)) from error
 
     return RepositoryScan(
         repository_url=request.url.strip(),
@@ -149,56 +211,21 @@ def sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-class CloneProgress(RemoteProgress):
-    def __init__(self, updates: queue.Queue) -> None:
-        super().__init__()
-        self.updates = updates
-
-    def update(self, op_code, cur_count, max_count=None, message="") -> None:
-        self.updates.put((op_code, cur_count, max_count))
-
-
-def clone_with_progress(clone_url: str, repo_path: Path) -> Iterator[str]:
-    """Clone in a worker thread while yielding cloning-percent status events."""
-    updates: queue.Queue = queue.Queue()
-    result: dict[str, GitCommandError] = {}
-
-    def worker() -> None:
-        try:
-            Repo.clone_from(clone_url, repo_path, depth=1, multi_options=["--no-tags"], progress=CloneProgress(updates))
-        except GitCommandError as error:
-            result["error"] = error
-        finally:
-            updates.put(None)
-
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
+def download_with_progress(repository: RepositoryReference, repo_path: Path) -> Iterator[str]:
     yield sse_event("status", {"phase": "cloning", "percent": 0})
-    last_percent = 0
-    while True:
-        item = updates.get()
-        if item is None:
-            break
-        op_code, cur_count, max_count = item
-        if op_code & RemoteProgress.RECEIVING and max_count:
-            percent = min(100, int(cur_count / max_count * 100))
-            if percent != last_percent:
-                last_percent = percent
-                yield sse_event("status", {"phase": "cloning", "percent": percent})
-    thread.join()
-    if "error" in result:
-        raise result["error"]
+    download_repository_archive(repository, repo_path)
+    yield sse_event("status", {"phase": "cloning", "percent": 100})
 
 
 @app.post("/api/repositories/scan/stream")
 def stream_repository_scan(request: RepositoryRequest) -> StreamingResponse:
-    clone_url = validate_github_url(request.url)
+    repository = validate_github_url(request.url)
 
     def events() -> Iterator[str]:
         try:
             with tempfile.TemporaryDirectory(prefix="aegis-review-") as temporary_directory:
                 repo_path = Path(temporary_directory) / "repository"
-                yield from clone_with_progress(clone_url, repo_path)
+                yield from download_with_progress(repository, repo_path)
                 yield sse_event("status", {"phase": "scanning"})
                 findings, scanned_files = scan_repository(repo_path)
                 yield sse_event("findings", {
@@ -220,8 +247,8 @@ def stream_repository_scan(request: RepositoryRequest) -> StreamingResponse:
                                 yield sse_event("analysis", {"index": order[reviewed], "analysis": analysis})
                             reviewed += 1
                 yield sse_event("done", {})
-        except GitCommandError:
-            yield sse_event("error", {"detail": "AegisReview could not clone that repository. Check that it exists and is public."})
+        except RepositoryDownloadError as error:
+            yield sse_event("error", {"detail": str(error)})
         except Exception as error:
             yield sse_event("error", {"detail": f"The scan stopped unexpectedly: {str(error)[:200]}"})
 
