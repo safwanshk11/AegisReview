@@ -155,7 +155,7 @@ export default function App() {
   }
 
   async function streamScan(target: string) {
-    const response = await fetch(`${API_URL}/api/repositories/scan/stream`, {
+    const response = await fetch(`${import.meta.env.VITE_API_URL}/api/repositories/scan/stream`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: target, review: reviewEnabled }),
     })
     if (!response.ok || !response.body) {
