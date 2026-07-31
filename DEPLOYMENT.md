@@ -14,7 +14,8 @@ different **Root Directory** for each.
   | Name | Required | Notes |
   | --- | --- | --- |
   | `GEMINI_API_KEY` | for AI review | Google Gemini key. Without it, scans still run (review steps are skipped). |
-  | `ALLOWED_ORIGINS` | yes | The frontend's URL, e.g. `https://aegis-frontend.vercel.app` (comma-separate multiple). Controls CORS. |
+  | `ALLOWED_ORIGINS` | yes* | The frontend's URL, e.g. `https://aegis-frontend.vercel.app` (comma-separate multiple). Controls CORS. |
+  | `ALLOWED_ORIGIN_REGEX` | yes* | Alternative to the above that also matches Vercel **preview** URLs (which change every deploy), e.g. `https://aegis-frontend.*\.vercel\.app`. Set this *or* `ALLOWED_ORIGINS`. |
   | `AEGIS_LLM_MODEL` | no | Defaults to `gemini-flash-latest`. |
   | `AEGIS_REVIEW_LIMIT` | no | Max findings reviewed per scan (default `6`). |
   | `GITHUB_TOKEN` | no | Raises GitHub archive-download rate limits (60/hr → 5000/hr). |
@@ -43,6 +44,19 @@ There's a chicken-and-egg between the two URLs, so:
 
 Changing `VITE_API_URL` requires a frontend redeploy (it's compiled in). Changing
 `ALLOWED_ORIGINS`/`GEMINI_API_KEY` requires a backend redeploy.
+
+## "Engine offline" checklist
+
+If the deployed dashboard shows **Engine offline**, it's one of these — none are code bugs:
+
+1. **Deployment Protection (SSO).** Per-deployment/branch URLs (`...-git-main-...`, `...-<hash>-...`)
+   are gated behind a Vercel login and 302 to `vercel.com/sso-api`. Use the **production** URLs
+   (e.g. `aegisbackend.vercel.app`) — public by default — or turn off
+   **Settings → Deployment Protection → Vercel Authentication** on both projects.
+2. **`VITE_API_URL` not set on the frontend** → it falls back to `localhost` and can't reach the
+   API. Set it to the backend URL and **redeploy the frontend** (it's compiled in at build time).
+3. **CORS.** The backend must allow the frontend's exact origin. If you test on changing preview
+   URLs, set `ALLOWED_ORIGIN_REGEX` (above) instead of listing them. Redeploy the backend after changing it.
 
 ## Caveats on serverless
 
