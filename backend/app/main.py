@@ -21,7 +21,8 @@ from app.scanner import Finding, scan_repository
 
 # Load the repository-root .env (matches .env.example) so GEMINI_API_KEY and
 # other backend settings are available without exporting them by hand.
-load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(ENV_PATH)
 
 MAX_FILES = 500
 IGNORED_DIRECTORIES = {".git", "node_modules", ".venv", "venv", "dist", "build"}
@@ -206,6 +207,7 @@ def stream_repository_scan(request: RepositoryRequest) -> StreamingResponse:
                     "findings": [VulnerabilityFinding(**finding).model_dump() for finding in findings],
                 })
                 if request.review:
+                    load_dotenv(ENV_PATH, override=True)  # pick up a freshly-changed key without restarting
                     limit = int(os.getenv("AEGIS_REVIEW_LIMIT", "6"))
                     order = sorted(range(len(findings)), key=lambda index: SEVERITY_RANK.get(findings[index]["severity"], 0), reverse=True)[:limit]
                     reviewed = 0
