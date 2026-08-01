@@ -357,6 +357,7 @@ function useRoute() {
   function navigate(to: string) {
     window.history.pushState({}, '', to)
     setPath(to)
+    window.scrollTo(0, 0)
   }
 
   return [path, navigate] as const

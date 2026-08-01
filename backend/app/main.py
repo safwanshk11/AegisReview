@@ -63,6 +63,7 @@ class VulnerabilityFinding(BaseModel):
     line_number: int
     rule: str
     severity: str
+    context: str = ""
     analysis: "FindingAnalysis | None" = None
 
 
@@ -196,7 +197,7 @@ def scan_repository_for_vulnerabilities(request: RepositoryRequest) -> Repositor
             repo_path = Path(temporary_directory) / "repository"
             download_repository_archive(repository, repo_path)
             findings, scanned_files = scan_repository(repo_path)
-            findings, agent_activity = AgenticReviewer().review_findings(repo_path, findings)
+            findings, agent_activity = AgenticReviewer().review_findings(findings)
     except RepositoryDownloadError as error:
         raise HTTPException(422, str(error)) from error
 
@@ -239,7 +240,7 @@ def stream_repository_scan(request: RepositoryRequest) -> StreamingResponse:
                     limit = int(os.getenv("AEGIS_REVIEW_LIMIT", "6"))
                     order = sorted(range(len(findings)), key=lambda index: SEVERITY_RANK.get(findings[index]["severity"], 0), reverse=True)[:limit]
                     reviewed = 0
-                    for event in AgenticReviewer().iter_review(repo_path, [findings[index] for index in order]):
+                    for event in AgenticReviewer().iter_review([findings[index] for index in order]):
                         if event["type"] == "activity":
                             yield sse_event("activity", event["activity"])
                         else:

@@ -11,6 +11,10 @@ from typing import Iterator
 
 MAX_FILE_SIZE_BYTES = 1_000_000
 IGNORED_DIRECTORIES = {".git", "node_modules", ".venv", "venv", "dist", "build"}
+TEST_PATH_MARKERS = {"test", "tests", "spec", "specs", "__tests__", "__mocks__", "fixture", "fixtures", "mock", "mocks"}
+# Deliberately broad: catches the AWS docs' own sample key (AKIAIOSFODNN7EXAMPLE) and
+# common seed/fixture values. Trade-off is a rare false negative over a common false alarm.
+PLACEHOLDER_MARKERS = ("example", "sample", "dummy", "fake", "changeme", "placeholder", "yourkey", "your_key", "insert_", "replace_me", "xxxxxxxx", "00000000", "test", "mock")
 
 
 class Finding(dict):
@@ -52,8 +56,33 @@ def shannon_entropy(value: str) -> float:
     return -sum((count / length) * math.log2(count / length) for count in frequencies.values())
 
 
-def make_finding(file_path: Path, root: Path, line: int, rule: str, severity: str) -> Finding:
-    return Finding(file=str(file_path.relative_to(root)), line_number=line, rule=rule, severity=severity)
+def make_finding(file_path: Path, root: Path, line: int, rule: str, severity: str, context: str = "") -> Finding:
+    return Finding(file=str(file_path.relative_to(root)), line_number=line, rule=rule, severity=severity, context=context)
+
+
+def redact_secrets(text: str) -> str:
+    text = SECRET_ASSIGNMENT.sub(lambda match: match.group(0).replace(match.group(1), "<REDACTED_SECRET>"), text)
+    return AWS_ACCESS_KEY.sub("<REDACTED_AWS_ACCESS_KEY>", text)
+
+
+def snippet_around(lines: list[str], line_number: int) -> str:
+    start = max(0, line_number - 3)
+    end = min(len(lines), line_number + 2)
+    numbered = "\n".join(f"{index + 1}: {lines[index]}" for index in range(start, end))
+    return redact_secrets(numbered)
+
+
+def is_test_path(file_path: Path, root: Path) -> bool:
+    relative = file_path.relative_to(root)
+    if any(part.lower() in TEST_PATH_MARKERS for part in relative.parts[:-1]):
+        return True
+    name = relative.name.lower()
+    return ".test." in name or ".spec." in name or name.startswith("test_") or name.startswith("mock_")
+
+
+def looks_like_placeholder(value: str) -> bool:
+    lowered = value.lower()
+    return any(marker in lowered for marker in PLACEHOLDER_MARKERS)
 
 
 def iter_scannable_files(root: Path) -> Iterator[Path]:
@@ -70,20 +99,25 @@ def scan_source_file(file_path: Path, root: Path) -> list[Finding]:
     except (OSError, UnicodeDecodeError):
         return []
 
+    lines = content.splitlines()
+    test_path = is_test_path(file_path, root)
     findings: list[Finding] = []
-    for line_number, line in enumerate(content.splitlines(), start=1):
+    for line_number, line in enumerate(lines, start=1):
         for match in SECRET_ASSIGNMENT.finditer(line):
-            if shannon_entropy(match.group(1)) >= 3.5:
-                findings.append(make_finding(file_path, root, line_number, "Hardcoded high-entropy secret", "critical"))
-        if AWS_ACCESS_KEY.search(line):
-            findings.append(make_finding(file_path, root, line_number, "Hardcoded AWS access key", "critical"))
+            if shannon_entropy(match.group(1)) >= 3.5 and not looks_like_placeholder(match.group(1)):
+                severity = "medium" if test_path else "critical"
+                findings.append(make_finding(file_path, root, line_number, "Hardcoded high-entropy secret", severity, snippet_around(lines, line_number)))
+        aws_match = AWS_ACCESS_KEY.search(line)
+        if aws_match and not looks_like_placeholder(aws_match.group(0)):
+            severity = "medium" if test_path else "critical"
+            findings.append(make_finding(file_path, root, line_number, "Hardcoded AWS access key", severity, snippet_around(lines, line_number)))
         if SQL_INTERPOLATION.search(line):
-            findings.append(make_finding(file_path, root, line_number, "SQL query built with string interpolation", "high"))
+            findings.append(make_finding(file_path, root, line_number, "SQL query built with string interpolation", "high", snippet_around(lines, line_number)))
         for pattern, rule in XSS_PATTERNS:
             if pattern.search(line):
-                findings.append(make_finding(file_path, root, line_number, rule, "high"))
+                findings.append(make_finding(file_path, root, line_number, rule, "high", snippet_around(lines, line_number)))
         if EVAL_EXEC.search(line):
-            findings.append(make_finding(file_path, root, line_number, "Dynamic eval/exec usage", "critical"))
+            findings.append(make_finding(file_path, root, line_number, "Dynamic eval/exec usage", "critical", snippet_around(lines, line_number)))
     return findings
 
 
@@ -100,11 +134,11 @@ def is_version_older(version: str, safe_version: str) -> bool:
     return parsed + (0,) * (length - len(parsed)) < safe + (0,) * (length - len(safe))
 
 
-def dependency_finding(file_path: Path, root: Path, line: int, name: str, version: str) -> Finding | None:
+def dependency_finding(file_path: Path, root: Path, line: int, name: str, version: str, lines: list[str]) -> Finding | None:
     known_bad = KNOWN_BAD_DEPENDENCIES.get(name.lower())
     if known_bad and is_version_older(version, known_bad[0]):
         safe_version, severity, description = known_bad
-        return make_finding(file_path, root, line, f"{description}; upgrade to {safe_version}+", severity)
+        return make_finding(file_path, root, line, f"{description}; upgrade to {safe_version}+", severity, snippet_around(lines, line))
     return None
 
 
@@ -119,7 +153,7 @@ def scan_package_json(file_path: Path, root: Path) -> list[Finding]:
     for section in ("dependencies", "devDependencies", "optionalDependencies"):
         for name, version in package.get(section, {}).items():
             line = next((index + 1 for index, value in enumerate(lines) if f'"{name}"' in value), 1)
-            finding = dependency_finding(file_path, root, line, name, str(version))
+            finding = dependency_finding(file_path, root, line, name, str(version), lines)
             if finding:
                 findings.append(finding)
     return findings
@@ -135,7 +169,7 @@ def scan_requirements(file_path: Path, root: Path) -> list[Finding]:
     for line_number, line in enumerate(lines, start=1):
         match = re.match(r"^\s*([A-Za-z0-9_.-]+)\s*==\s*([^\s;#]+)", line)
         if match:
-            finding = dependency_finding(file_path, root, line_number, match.group(1), match.group(2))
+            finding = dependency_finding(file_path, root, line_number, match.group(1), match.group(2), lines)
             if finding:
                 findings.append(finding)
     return findings

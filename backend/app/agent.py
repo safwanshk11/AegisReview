@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import json
 import os
-import re
-from pathlib import Path
 from typing import Any, Iterator
 
-from app.scanner import AWS_ACCESS_KEY, SECRET_ASSIGNMENT, Finding
+from app.scanner import Finding
 
 DEFAULT_MODEL = "gemini-flash-latest"
 GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
@@ -32,17 +30,17 @@ class AgenticReviewer:
     def enabled(self) -> bool:
         return self.client is not None
 
-    def review_findings(self, root: Path, findings: list[Finding]) -> tuple[list[Finding], list[dict[str, str]]]:
+    def review_findings(self, findings: list[Finding]) -> tuple[list[Finding], list[dict[str, str]]]:
         activity: list[dict[str, str]] = []
         enriched: list[Finding] = []
-        for event in self.iter_review(root, findings):
+        for event in self.iter_review(findings):
             if event["type"] == "activity":
                 activity.append(event["activity"])
             else:
                 enriched.append(event["finding"])
         return enriched, activity
 
-    def iter_review(self, root: Path, findings: list[Finding]) -> Iterator[dict[str, Any]]:
+    def iter_review(self, findings: list[Finding]) -> Iterator[dict[str, Any]]:
         """Yield each agent step as it happens, then the (possibly enriched) finding."""
         for finding in findings:
             finding_id = f"{finding['file']}:{finding['line_number']}"
@@ -58,7 +56,7 @@ class AgenticReviewer:
                 continue
 
             try:
-                context = read_finding_context(root, finding)
+                context = finding.get("context") or "Source context unavailable; reason from the finding metadata."
                 plan = self._call_json("plan", plan_prompt(finding, context))
                 yield {"type": "activity", "activity": {"finding_id": finding_id, "step": "plan", "status": "completed", "detail": plan["plan"]}}
 
@@ -94,23 +92,6 @@ class AgenticReviewer:
         if not isinstance(parsed, dict):
             raise ValueError(f"Agent {step} step returned an invalid response shape.")
         return parsed
-
-
-def read_finding_context(root: Path, finding: Finding) -> str:
-    file_path = root / finding["file"]
-    try:
-        lines = file_path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
-        return "Source context unavailable; reason from the finding metadata."
-    start = max(0, finding["line_number"] - 3)
-    end = min(len(lines), finding["line_number"] + 2)
-    snippet = "\n".join(f"{index + 1}: {line}" for index, line in enumerate(lines[start:end], start=start))
-    return redact_secrets(snippet)
-
-
-def redact_secrets(text: str) -> str:
-    text = SECRET_ASSIGNMENT.sub(lambda match: match.group(0).replace(match.group(1), "<REDACTED_SECRET>"), text)
-    return AWS_ACCESS_KEY.sub("<REDACTED_AWS_ACCESS_KEY>", text)
 
 
 def plan_prompt(finding: Finding, context: str) -> str:
