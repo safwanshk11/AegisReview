@@ -6,6 +6,8 @@ import json
 import os
 from typing import Any, Iterator
 
+from openai import RateLimitError
+
 from app.scanner import Finding
 
 DEFAULT_MODEL = "gemini-flash-latest"
@@ -42,6 +44,7 @@ class AgenticReviewer:
 
     def iter_review(self, findings: list[Finding]) -> Iterator[dict[str, Any]]:
         """Yield each agent step as it happens, then the (possibly enriched) finding."""
+        quota_exhausted = False
         for finding in findings:
             finding_id = f"{finding['file']}:{finding['line_number']}"
             if not self.enabled:
@@ -52,6 +55,18 @@ class AgenticReviewer:
                         "status": "skipped",
                         "detail": "Set GEMINI_API_KEY to enable the agentic review loop.",
                     }}
+                yield {"type": "finding", "finding": finding}
+                continue
+
+            # Once quota is confirmed exhausted, stop spending time on calls that will
+            # fail the same way — skip the rest instantly instead of retrying each one.
+            if quota_exhausted:
+                yield {"type": "activity", "activity": {
+                    "finding_id": finding_id,
+                    "step": "review",
+                    "status": "skipped",
+                    "detail": "Skipped: today's AI review quota ran out earlier in this scan.",
+                }}
                 yield {"type": "finding", "finding": finding}
                 continue
 
@@ -71,6 +86,15 @@ class AgenticReviewer:
                     "review": review["review"],
                     "approved": bool(review["approved"]),
                 })}
+            except RateLimitError:
+                quota_exhausted = True
+                yield {"type": "activity", "activity": {
+                    "finding_id": finding_id,
+                    "step": "review",
+                    "status": "failed",
+                    "detail": "Today's AI review quota was reached. The rest of this scan's findings will be skipped.",
+                }}
+                yield {"type": "finding", "finding": finding}
             except Exception as error:
                 yield {"type": "activity", "activity": {"finding_id": finding_id, "step": "review", "status": "failed", "detail": str(error)[:300]}}
                 yield {"type": "finding", "finding": finding}

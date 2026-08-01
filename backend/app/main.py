@@ -237,7 +237,8 @@ def stream_repository_scan(request: RepositoryRequest) -> StreamingResponse:
                 })
                 if request.review:
                     load_dotenv(ENV_PATH, override=True)  # pick up a freshly-changed key without restarting
-                    limit = int(os.getenv("AEGIS_REVIEW_LIMIT", "6"))
+                    limit_env = os.getenv("AEGIS_REVIEW_LIMIT")
+                    limit = int(limit_env) if limit_env else len(findings)  # review everything by default
                     order = sorted(range(len(findings)), key=lambda index: SEVERITY_RANK.get(findings[index]["severity"], 0), reverse=True)[:limit]
                     reviewed = 0
                     for event in AgenticReviewer().iter_review([findings[index] for index in order]):
