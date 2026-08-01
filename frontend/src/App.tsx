@@ -1,8 +1,9 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
+import Landing from './Landing'
 
 type Inspection = { repository_url: string; files: string[]; file_count: number; truncated: boolean }
 type Analysis = { explanation: string; diff: string; review: string; approved: boolean }
-type Finding = { file: string; line_number: number; rule: string; severity: 'low' | 'medium' | 'high' | 'critical'; analysis: Analysis | null }
+type Finding = { file: string; line_number: number; rule: string; severity: 'low' | 'medium' | 'high' | 'critical'; context: string; analysis: Analysis | null }
 type Activity = { finding_id: string; step: string; status: string; detail: string }
 type Scan = { repository_url: string; scanned_files: number; findings: Finding[]; agent_activity: Activity[] }
 type Mode = 'scan' | 'map'
@@ -54,7 +55,7 @@ function downloadReport(content: string, filename: string, type: string) {
   URL.revokeObjectURL(url)
 }
 
-function ShieldMark() {
+export function ShieldMark() {
   return <svg aria-hidden="true" className="shield-mark" viewBox="0 0 42 48" fill="none">
     <path d="M21 2 38 8v13c0 11.7-6.8 20.1-17 25C10.8 41.1 4 32.7 4 21V8L21 2Z" stroke="currentColor" strokeWidth="2.5" />
     <path d="m13 24 5.2 5.1L30 17" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
@@ -71,7 +72,7 @@ function DiffView({ diff }: { diff: string }) {
   })}</code></pre>
 }
 
-export default function App() {
+function ReviewConsole() {
   const [url, setUrl] = useState('')
   const [mode, setMode] = useState<Mode>('scan')
   const [inspection, setInspection] = useState<Inspection | null>(null)
@@ -278,9 +279,15 @@ export default function App() {
 
       {scan ? <div className="scan-report">
         <div className="summary-card">
-          <div className={`health health-${healthBand.key}`}><b>{health}</b><span>repo health<br />{healthBand.label}</span></div>
+          <div className={`health health-${healthBand.key}`}>
+            <div className="health-figure"><b>{health}</b><span>repo health<br />{healthBand.label}</span></div>
+            <div className="health-bar"><div className="health-bar-fill" style={{ width: `${health}%` }} /></div>
+          </div>
           <div className="severity-strip">
-            {counts.map(({ severity, count }) => <div className={`severity ${severity}`} key={severity}><b>{String(count).padStart(2, '0')}</b><span>{severity}</span></div>)}
+            {counts.map(({ severity, count }) => <div className={`severity ${severity}`} key={severity}>
+              <div className="severity-figure"><b>{String(count).padStart(2, '0')}</b><span>{severity}</span></div>
+              <div className="severity-bar"><div className="severity-bar-fill" style={{ width: `${sortedFindings.length ? (count / sortedFindings.length) * 100 : 0}%` }} /></div>
+            </div>)}
           </div>
         </div>
 
@@ -309,7 +316,8 @@ export default function App() {
                     <div className="detail-block"><h4>Explanation</h4><p>{finding.analysis.explanation}</p></div>
                     <div className="detail-block"><h4>Suggested fix<span className={`verdict ${finding.analysis.approved ? 'ok' : 'flag'}`}>{finding.analysis.approved ? 'self-review passed' : 'needs attention'}</span></h4><DiffView diff={finding.analysis.diff} /></div>
                     <div className="detail-block"><h4>Agent review</h4><p>{finding.analysis.review}</p></div>
-                  </> : <p className="detail-empty">Agent analysis unavailable. Set GEMINI_API_KEY to enable the plan → act → review loop.</p>}
+                  </> : finding.context ? <div className="detail-block"><h4>Flagged code</h4><DiffView diff={finding.context} /></div>
+                    : <p className="detail-empty">Source context unavailable for this finding.</p>}
                 </div>}
               </div>
             }) : <div className="clear-state"><ShieldMark /><p>No matching risk patterns were found.</p><small>That is a clean first pass—not a guarantee of safety.</small></div>}
@@ -335,4 +343,26 @@ export default function App() {
 
     <footer><span>AegisReview · local static analysis</span><span>Public repository workflow</span></footer>
   </main>
+}
+
+function useRoute() {
+  const [path, setPath] = useState(() => window.location.pathname)
+
+  useEffect(() => {
+    const onPopState = () => setPath(window.location.pathname)
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
+
+  function navigate(to: string) {
+    window.history.pushState({}, '', to)
+    setPath(to)
+  }
+
+  return [path, navigate] as const
+}
+
+export default function App() {
+  const [path, navigate] = useRoute()
+  return path === '/app' ? <ReviewConsole /> : <Landing onStart={() => navigate('/app')} />
 }
