@@ -9,10 +9,7 @@ agent plans, drafts, and self-checks a fix for each finding, live.
 **Live app:** **https://aegisreview-frontend.onrender.com**
 
 ## Demo
-
-<video src="docs/demo.mp4" controls width="720">
-  Your browser doesn't support inline video — <a href="docs/demo.mp4">watch/download it here</a>.
-</video>
+https://drive.google.com/file/d/102L9fhLNrNtu9uFoQsBCBT9ktHKspAbg/view
 
 ---
 
